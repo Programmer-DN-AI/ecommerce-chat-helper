@@ -11,8 +11,31 @@ import { z } from "zod"
 // Load environment variables from .env file (API keys, connection strings)
 import "dotenv/config"
 
+// Validate required environment variables
+function validateEnvironmentVariables(): void {
+  const requiredVars = ['MONGODB_ATLAS_URI', 'GOOGLE_API_KEY']
+  const missingVars = requiredVars.filter(varName => !process.env[varName])
+  
+  if (missingVars.length > 0) {
+    console.error('❌ Missing required environment variables:')
+    missingVars.forEach(varName => {
+      console.error(`   - ${varName}`)
+    })
+    console.error('\n📝 Please create a .env file in the server directory with the following variables:')
+    console.error('   MONGODB_ATLAS_URI=your_mongodb_connection_string')
+    console.error('   GOOGLE_API_KEY=your_google_api_key')
+    console.error('\n🔗 Get your Google API key from: https://makersuite.google.com/app/apikey')
+    process.exit(1)
+  }
+  
+  console.log('✅ Environment variables validated successfully')
+}
+
+// Validate environment variables before proceeding
+validateEnvironmentVariables()
+
 // Create MongoDB client instance using connection string from environment variables
-const client = new MongoClient(process.env.MONGODB_ATLAS_URI as string)
+const client = new MongoClient(process.env.MONGODB_ATLAS_URI!)
 
 // Initialize Google Gemini chat model for generating synthetic furniture data
 const llm = new ChatGoogleGenerativeAI({
@@ -147,15 +170,72 @@ async function createItemSummary(item: Item): Promise<string> {
   })
 }
 
+// Helper function to force garbage collection if available
+function forceGC(): void {
+  if (global.gc) {
+    global.gc()
+  }
+}
+
+// Process items in batches to reduce memory usage
+async function processBatch(
+  items: Item[], 
+  collection: any, 
+  batchSize: number = 3
+): Promise<void> {
+  const embeddings = new GoogleGenerativeAIEmbeddings({
+    apiKey: process.env.GOOGLE_API_KEY,
+    modelName: "text-embedding-004",
+  })
+
+  for (let i = 0; i < items.length; i += batchSize) {
+    const batch = items.slice(i, i + batchSize)
+    console.log(`Processing batch ${Math.floor(i / batchSize) + 1}/${Math.ceil(items.length / batchSize)}`)
+    
+    // Process each item in the batch
+    for (const item of batch) {
+      const summary = await createItemSummary(item)
+      const record = {
+        pageContent: summary,
+        metadata: { ...item },
+      }
+
+      // Create vector embeddings and store in MongoDB Atlas
+      await MongoDBAtlasVectorSearch.fromDocuments(
+        [record],
+        embeddings,
+        {
+          collection,
+          indexName: "vector_index",
+          textKey: "embedding_text",
+          embeddingKey: "embedding",
+        }
+      )
+
+      console.log("Successfully processed & saved record:", item.item_id)
+    }
+
+    // Force garbage collection after each batch
+    forceGC()
+    
+    // Small delay to allow memory cleanup
+    await new Promise(resolve => setTimeout(resolve, 1000))
+  }
+}
+
 // Main function to populate database with AI-generated furniture data
 async function seedDatabase(): Promise<void> {
   try {
+    console.log("🔌 Connecting to MongoDB...")
+    
     // Establish connection to MongoDB Atlas
     await client.connect()
+    
     // Ping database to verify connection works
     await client.db("admin").command({ ping: 1 })
+    
     // Log successful connection
-    console.log("You successfully connected to MongoDB!")
+    console.log("✅ Successfully connected to MongoDB!")
 
     // Setup database and collection
     await setupDatabaseAndCollection()
@@ -174,35 +254,10 @@ async function seedDatabase(): Promise<void> {
     
     // Generate new synthetic furniture data using AI
     const syntheticData = await generateSyntheticData()
+    console.log(`Generated ${syntheticData.length} items`)
 
-    // Process each item: create summary and prepare for vector storage
-    const recordsWithSummaries = await Promise.all(
-      syntheticData.map(async (record) => ({
-        pageContent: await createItemSummary(record),  // Create searchable summary
-        metadata: {...record},                         // Preserve original item data
-      }))
-    )
-    
-    // Store each record with vector embeddings in MongoDB
-    for (const record of recordsWithSummaries) {
-      // Create vector embeddings and store in MongoDB Atlas using Gemini
-      await MongoDBAtlasVectorSearch.fromDocuments(
-        [record],                    // Array containing single record
-        new GoogleGenerativeAIEmbeddings({            // Google embedding model
-          apiKey: process.env.GOOGLE_API_KEY,         // Google API key
-          modelName: "text-embedding-004",            // Google's standard embedding model (768 dimensions)
-        }),
-        {
-          collection,                // MongoDB collection reference
-          indexName: "vector_index", // Name of vector search index
-          textKey: "embedding_text", // Field name for searchable text
-          embeddingKey: "embedding", // Field name for vector embeddings
-        }
-      )
-
-      // Log progress for each successfully processed item
-      console.log("Successfully processed & saved record:", record.metadata.item_id)
-    }
+    // Process items in batches to reduce memory usage
+    await processBatch(syntheticData, collection, 3)
 
     // Log completion of entire seeding process
     console.log("Database seeding completed")
