@@ -76,3 +76,4 @@ npm run seed:small
 - Google Gemini AI integration
 - TypeScript for type safety
 - Environment variable configuration
+

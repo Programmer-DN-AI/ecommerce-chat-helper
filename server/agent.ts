@@ -63,7 +63,10 @@ export async function callAgent(client: MongoClient, query: string, thread_id: s
       async (input: any) => {
         const { query, n = 10 } = input
         try {
-          console.log("Item lookup tool called with query:", query)
+          // Ensure query is a string to avoid errors inside embeddings (e.g., calling replace on undefined)
+          const safeQuery: string = typeof query === "string" ? query : (query == null ? "" : String(query))
+
+          console.log("Item lookup tool called with query:", safeQuery)
 
           // Check if database has any data at all
           const totalCount = await collection.countDocuments()
@@ -100,21 +103,31 @@ export async function callAgent(client: MongoClient, query: string, thread_id: s
             dbConfig
           )
 
-          console.log("Performing vector search...")
-          // Perform semantic search using vector embeddings
-          const result = await vectorStore.similaritySearchWithScore(query, n)
-          console.log(`Vector search returned ${result.length} results`)
-          
-          // If vector search returns no results, fall back to text search
-          if (result.length === 0) {
+          // If query is empty after coercion, skip vector search and do text search
+          let result: any[] = []
+          if (safeQuery.trim().length > 0) {
+            try {
+              console.log("Performing vector search...")
+              // Perform semantic search using vector embeddings
+              result = await vectorStore.similaritySearchWithScore(safeQuery, n)
+              console.log(`Vector search returned ${result.length} results`)
+            } catch (vsErr: any) {
+              console.warn("Vector search failed, falling back to text search:", vsErr?.message || vsErr)
+            }
+          } else {
+            console.log("Empty query string detected; skipping vector search")
+          }
+
+          // If vector search returns no results or was skipped/failed, fall back to text search
+          if (!Array.isArray(result) || result.length === 0) {
             console.log("Vector search returned no results, trying text search...")
             // MongoDB text search using regular expressions
             const textResults = await collection.find({
               $or: [ // OR condition - match any of these fields
-                { item_name: { $regex: query, $options: 'i' } },        // Case-insensitive search in item name
-                { item_description: { $regex: query, $options: 'i' } }, // Case-insensitive search in description
-                { categories: { $regex: query, $options: 'i' } },       // Case-insensitive search in categories
-                { embedding_text: { $regex: query, $options: 'i' } }    // Case-insensitive search in embedding text
+                { item_name: { $regex: safeQuery, $options: 'i' } },        // Case-insensitive search in item name
+                { item_description: { $regex: safeQuery, $options: 'i' } }, // Case-insensitive search in description
+                { categories: { $regex: safeQuery, $options: 'i' } },       // Case-insensitive search in categories
+                { embedding_text: { $regex: safeQuery, $options: 'i' } }    // Case-insensitive search in embedding text
               ]
             }).limit(n).toArray() // Limit results and convert to array
             
@@ -123,7 +136,7 @@ export async function callAgent(client: MongoClient, query: string, thread_id: s
             return JSON.stringify({
               results: textResults,
               searchType: "text",    // Indicate this was a text search
-              query: query,
+              query: safeQuery,
               count: textResults.length
             })
           }
@@ -132,7 +145,7 @@ export async function callAgent(client: MongoClient, query: string, thread_id: s
           return JSON.stringify({
             results: result,
             searchType: "vector",   // Indicate this was a vector search
-            query: query,
+            query: safeQuery,
             count: result.length
           })
           
@@ -149,7 +162,7 @@ export async function callAgent(client: MongoClient, query: string, thread_id: s
           return JSON.stringify({ 
             error: "Failed to search inventory", 
             details: error.message,
-            query: query
+            query: typeof query === "string" ? query : ""
           })
         }
       },
