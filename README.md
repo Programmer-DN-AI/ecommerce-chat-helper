@@ -80,7 +80,7 @@ Before we start, make sure you have:
 
 ```bash
 # Clone the repository
-git clone https://github.com/kubowania/ecommerce-chat-helper
+git clone https://github.com/Programmer-DN-AI/ecommerce-chat-helper
 cd ecommerce-chat-helper
 
 # Install server dependencies
